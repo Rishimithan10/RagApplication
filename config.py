@@ -12,3 +12,5 @@ pinecone_key = os.getenv("pinecone_key")
 # Hugging Face or OpenAI
 hugging_face = os.getenv("hugging_face")
 open_api_key = os.getenv("open_api_key")
+
+fire_base_api_key=os.getenv("FIREBASE_API_KEY")

@@ -1,3 +1,10 @@
 streamlit
 requests
+pdfminer.six
+PyPDF2
 firebase-admin
+openai
+numpy
+pandas
+scikit-learn
+python-dotenv

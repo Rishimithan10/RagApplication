@@ -10,6 +10,5 @@ scikit-learn
 python-dotenv
 transformers
 torch
-json
 datetime
 pinecone

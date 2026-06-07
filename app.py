@@ -1,141 +1,15 @@
 import streamlit as st
-import requests
 import os
 import tempfile
 import time
-import json
 
-from utils import pdf_extract, chunks as chunker, vector_store, qa_engine, firebase, tokens
-
+from utils import pdf_extract, chunks as chunker, vector_store, qa_engine, latency
+from utils.ragas_eval import evaluate_rag
+from config import groq_api_key
 
 st.set_page_config(page_title="Document Chat Assistant", layout="centered")
 
-
-if "id_token" not in st.session_state:
-    saved = tokens.load_tokens()
-    if saved:
-        st.session_state.id_token = saved["id_token"]
-        st.session_state.refresh_token = saved["refresh_token"]
-        st.session_state.user_id = saved["user_id"]
-        st.session_state.token_expiry = saved["token_expiry"]
-        
-if "id_token" not in st.session_state:
-    st.sidebar.title("Login/Register")
-    st.title("💬 Doc Chat Assistant")
-
-    st.markdown("""
-    Welcome to the **Doc Chat Assistant** — your intelligent assistant to understand and interact with your PDF documents.  
-    <br>
-    📄 Simply upload a PDF file — whether it's a resume, report, or academic paper.  
-    <br>
-    💬 Then, ask any question related to the document — from summaries to specific details.  
-    <br>
-    🧠 The assistant uses AI to retrieve and generate accurate, context-aware answers directly from the uploaded content.  
-    <br>
-    Let's get started!
-    """, unsafe_allow_html=True)
-
-    # Initialize register form toggle
-    if "show_register_form" not in st.session_state:
-        st.session_state.show_register_form = False
-
-    # 📋 Register Fields
-    if st.session_state.show_register_form:
-        st.sidebar.subheader("👤 Create Account")
-
-        first_name = st.sidebar.text_input("First Name", key="register_first_name")
-        last_name = st.sidebar.text_input("Last Name", key="register_last_name")
-        reg_email = st.sidebar.text_input("Email", key="register_email")
-        reg_password = st.sidebar.text_input("Password", type="password", key="register_password")
-
-        if st.sidebar.button("Signup"):
-            res = firebase.firebase_signup(reg_email, reg_password, first_name, last_name)
-
-            if "id_token" in res or "idToken" in res:
-                st.sidebar.success("✅ Registered. Please log in.")
-                st.session_state.show_register_form = False
-                st.rerun()
-            else:
-                error = res.get("error") if isinstance(res, dict) else str(res)
-                st.sidebar.error("❌ Registration failed: " + error)
-
-        # Optional: Cancel button to go back to login
-        if st.sidebar.button("Back to Login"):
-            st.session_state.show_register_form = False
-            st.rerun()
-
-    # 🔐 Show login form only if not registering
-    if not st.session_state.show_register_form:
-        email = st.sidebar.text_input("Email", key="login_email")
-        password = st.sidebar.text_input("Password", type="password", key="login_password")
-        col1, col2 = st.sidebar.columns(2)
-
-        if col1.button("Login"):
-            res = firebase.firebase_login(email, password)
-            if "idToken" in res:
-                st.session_state.id_token = res["idToken"]
-                st.session_state.refresh_token = res["refreshToken"]
-                st.session_state.user_id = res["localId"]
-                st.session_state.token_expiry = time.time() + int(res["expiresIn"])
-                st.session_state.user_email = str(email)
-                user_data = firebase.get_user_details(st.session_state.user_id)
-                if user_data:
-                    st.session_state.first_name = user_data.get("first_name")
-                    st.session_state.last_name = user_data.get("last_name")
-                tokens.save_tokens({
-                    "id_token": st.session_state.id_token,
-                    "refresh_token": st.session_state.refresh_token,
-                    "user_id": st.session_state.user_id,
-                    "token_expiry": st.session_state.token_expiry
-                })
-                
-                st.rerun()
-            else:
-                st.sidebar.error("❌ Login failed: " + res.get("error", {}).get("message", "Unknown error"))
-
-        if col2.button("Register"):
-            st.session_state.show_register_form = True
-            st.rerun()
-
-    st.stop()
-
-
-# === Auto-refresh token if expiring ===
-if "id_token" in st.session_state and "token_expiry" in st.session_state:
-    if time.time() > st.session_state.token_expiry - 30:
-        refresh_result = firebase.refresh_firebase_token(st.session_state.refresh_token)
-        if "id_token" in refresh_result:
-            st.session_state.id_token = refresh_result["id_token"]
-            st.session_state.refresh_token = refresh_result["refresh_token"]
-            st.session_state.token_expiry = time.time() + int(refresh_result["expires_in"])
-
-            tokens.save_tokens({
-                "id_token": st.session_state.id_token,
-                "refresh_token": st.session_state.refresh_token,
-                "user_id": st.session_state.user_id,
-                "token_expiry": st.session_state.token_expiry
-            })
-        else:
-            st.sidebar.warning("Session expired. Please login again.")
-            tokens.delete_tokens()
-            st.session_state.clear()
-            st.rerun()
-
 st.sidebar.title("💬 Doc Chat Assistant")
-user_id=st.session_state.user_id
-user_detail=firebase.get_user_details(user_id)
-
-first_name=user_detail["first_name"]
-last_name=user_detail["last_name"]
-st.sidebar.markdown(f"👋 Welcome, {first_name} {last_name}")
-
-
-if st.sidebar.button("Logout"):
-    tokens.delete_tokens()
-    st.session_state.clear()
-    st.rerun()
-
-user_id = st.session_state.get("user_id", "anonymous")
 st.sidebar.markdown("---")
 
 # === Upload Document ===
@@ -143,9 +17,7 @@ st.header("📄 Upload Your Document")
 uploaded_file = st.file_uploader("Choose a PDF Document", type=["pdf"])
 
 if uploaded_file:
-    # Reset previous document data
     st.session_state.doc_name = None
-
     doc_name = uploaded_file.name.replace(".pdf", "")
     st.session_state.doc_name = doc_name
 
@@ -153,16 +25,21 @@ if uploaded_file:
         tmp_file.write(uploaded_file.read())
         tmp_path = tmp_file.name
 
+    latency.reset()
     text = pdf_extract.extract_text_from_pdf(tmp_path)
     if not text:
         st.error("❌ Failed to read PDF.")
         st.stop()
 
     chunks = chunker.chunk_text(text)
-    vector_store.store_chunks(chunks, user_id, doc_name)
-    st.success(f"✅ Document {doc_name} processed and ready for chat!")
+    vector_store.store_chunks(chunks, "default_user", doc_name)
+    st.success(f"✅ Document '{doc_name}' processed and ready for chat!")
     os.remove(tmp_path)
 
+    upload_timings = latency.get_all()
+    with st.expander("⏱️ Upload Latency Breakdown"):
+        for step, seconds in upload_timings.items():
+            st.markdown(f"- **{step}**: `{seconds}s`")
 
 # === Chat History ===
 if "chat_history" not in st.session_state:
@@ -178,20 +55,35 @@ if "doc_name" in st.session_state:
         doc_name = st.session_state.doc_name
         st.session_state.chat_history.append({"role": "user", "content": user_input})
 
+        latency.reset()
+        overall_start = time.perf_counter()
+
         with st.spinner("Thinking..."):
-            retrieved_chunks = vector_store.retrieve_similar_chunks(user_input, user_id, doc_name)
+            retrieved_chunks = vector_store.retrieve_similar_chunks(user_input, "default_user", doc_name)
             if not retrieved_chunks:
                 answer = "⚠️ Sorry, no relevant info found in the document."
+                ragas_scores = None
             else:
                 answer = qa_engine.generate_answer(retrieved_chunks, user_input)
 
+        overall_end = time.perf_counter()
         st.session_state.chat_history.append({"role": "assistant", "content": answer})
+        st.session_state["last_latency"] = latency.get_all()
+        st.session_state["last_latency_total"] = round(overall_end - overall_start, 4)
 
+        # Run evaluation after answer is ready
+        if retrieved_chunks:
+            with st.spinner("Evaluating response quality..."):
+                ragas_scores = evaluate_rag(user_input, answer, retrieved_chunks, groq_api_key)
+            st.session_state["last_ragas"] = ragas_scores
+        else:
+            st.session_state["last_ragas"] = None
+
+# === Render Chat History ===
 for i, chat in enumerate(st.session_state.chat_history):
     with st.chat_message(chat["role"]):
         lines = chat["content"].strip().split("\n")
         is_last_message = (i == len(st.session_state.chat_history) - 1)
-
         for line in lines:
             if line.strip():
                 if is_last_message:
@@ -204,3 +96,47 @@ for i, chat in enumerate(st.session_state.chat_history):
                     time.sleep(0.3)
                 else:
                     st.markdown(line.strip())
+
+# === RAGAS Evaluation Scores ===
+if st.session_state.get("last_ragas"):
+    scores = st.session_state["last_ragas"]
+
+    if "error" in scores:
+        with st.expander("📊 Evaluation Scores"):
+            st.warning(f"Evaluation error: {scores['error']}")
+    else:
+        with st.expander("📊 Response Quality Evaluation"):
+
+            # Score cards
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Faithfulness",      f"{scores['faithfulness']['score']:.2f}",
+                        help="Is the answer grounded in the document chunks?")
+            col2.metric("Answer Relevancy",  f"{scores['answer_relevancy']['score']:.2f}",
+                        help="Does the answer address the question?")
+            col3.metric("Context Precision", f"{scores['context_precision']['score']:.2f}",
+                        help="Were the right chunks retrieved?")
+
+            st.markdown("---")
+
+            # Detailed reasons
+            for metric, label in [
+                ("faithfulness",      "Faithfulness"),
+                ("answer_relevancy",  "Answer Relevancy"),
+                ("context_precision", "Context Precision"),
+            ]:
+                val    = scores[metric]["score"]
+                reason = scores[metric]["reason"]
+
+                if val >= 0.8:
+                    st.success(f"✅ **{label}** ({val}) — {reason}")
+                elif val >= 0.5:
+                    st.warning(f"⚠️ **{label}** ({val}) — {reason}")
+                else:
+                    st.error(f"❌ **{label}** ({val}) — {reason}")
+
+# === Latency Breakdown ===
+if "last_latency" in st.session_state and st.session_state.chat_history:
+    with st.expander("⏱️ Query Latency Breakdown"):
+        for step, seconds in st.session_state["last_latency"].items():
+            st.markdown(f"- **{step}**: `{seconds}s`")
+        st.markdown(f"- **Total (end-to-end)**: `{st.session_state['last_latency_total']}s`")

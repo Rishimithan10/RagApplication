@@ -7,7 +7,7 @@ def firebase_signup(email, password, first_name, last_name):
 
     # Step 1: Sign up user using Firebase Auth REST API
     if not firebase_admin._apps:
-        cred = credentials.Certificate("ragapplication-28e4f-firebase-adminsdk-fbsvc-dfff17bce0.json")  # 🔁 Replace with your actual path
+        cred = credentials.Certificate("ragapplication-511a6-firebase-adminsdk-fbsvc-6de92b8df5.json")  # 🔁 Replace with your actual path
         firebase_admin.initialize_app(cred)
 
     db = firestore.client()

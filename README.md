@@ -114,7 +114,7 @@ Generated Response
 ## 📂 Repository Structure
 
 ```text
-AI-Applications/
+RagApplication/
 │
 ├── RagApplication/
 │   ├── app.py
@@ -135,9 +135,9 @@ AI-Applications/
     ├── agent.py
     ├── main.py
     ├── adapter/
-    ├── requirements.txt
-    └── Dockerfile
+    └── requirements.txt
 ```
+
 
 ---
 

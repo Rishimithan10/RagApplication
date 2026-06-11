@@ -7,6 +7,7 @@ from sentence_transformers import SentenceTransformer
 from tavily import TavilyClient
 from dotenv import load_dotenv
 from model import get_model
+import re
 
 load_dotenv()
 
@@ -29,12 +30,38 @@ class AgentState(TypedDict):
 # ── Nodes ─────────────────────────────────────────────────────
 def router(state: AgentState) -> AgentState:
     question = state["question"].lower()
-    if "```python" in question or "execute" in question:
+
+    # Detect code execution intent
+    code_signals = [
+        "```python",           # explicit code block
+        "execute",             # "execute this"
+        "run this",            # "run this code"
+        "run the code",
+        "calculate",           # "calculate the result"
+        "compute",             # "compute this"
+        "what is the output",  # "what is the output of"
+        "what does this print",
+        "result =",            # contains assignment
+        "import ",             # contains import statement
+    ]
+
+    # Detect web search intent
+    web_signals = [
+        "latest", "recent",
+        "2025", "2026",
+        "news", "today",
+        "current", "now",
+        "update",
+    ]
+
+    if any(signal in question for signal in code_signals):
         tool = "code_executor"
-    elif any(w in question for w in ["latest", "recent", "2025", "2026", "news"]):
+    elif any(signal in question for signal in web_signals):
         tool = "web_search"
     else:
         tool = "pinecone_search"
+
+    print(f"[Router] Selected: {tool}")
     return {**state, "tool_used": tool}
 
 
@@ -73,69 +100,98 @@ def web_search(state: AgentState) -> AgentState:
 
 
 def code_executor(state: AgentState) -> AgentState:
-    import re
-    code_match = re.search(r"```python(.*?)```", state["question"], re.DOTALL)
+    question = state["question"]
+
+    # Try to find code block with backticks first
+    code_match = re.search(r"```python(.*?)```", question, re.DOTALL)
+
     if code_match:
-        try:
-            exec_globals = {}
-            exec(code_match.group(1).strip(), exec_globals)
-            output = str(exec_globals.get("result", "Executed successfully"))
-        except Exception as e:
-            output = f"Error: {str(e)}"
+        code = code_match.group(1).strip()
     else:
-        output = "No executable code found."
+        # Try to extract raw code without backticks
+        # Remove common prefixes like "run this:", "calculate:", etc.
+        prefixes = [
+            "run this code:", "run this:", "execute this:",
+            "calculate:", "compute:", "what is the output of:",
+            "run:", "execute:",
+        ]
+        code = question
+        for prefix in prefixes:
+            if prefix in code.lower():
+                # Take everything after the prefix
+                idx  = code.lower().index(prefix)
+                code = code[idx + len(prefix):].strip()
+                break
+
+    print(f"[Code] Executing: {code[:100]}")
+
+    try:
+        exec_globals = {}
+        exec(code, exec_globals)
+        # Try common output variable names
+        output = (
+            exec_globals.get("result") or
+            exec_globals.get("output") or
+            exec_globals.get("answer") or
+            "Code executed successfully"
+        )
+        output = str(output)
+    except Exception as e:
+        output = f"Error: {str(e)}"
+
+    print(f"[Code] Output: {output[:100]}")
     return {**state, "tool_used": "code_executor", "context": output}
 
 from model import generate_response
 
-# def generate_answer(state: AgentState) -> AgentState:
-#     prompt = f"""Use this context to answer the question accurately.
-
-#     Context:
-#     {state['context']}
-
-#     Question:
-#     {state['question']}
-
-#     Answer:"""
-
-#     answer = generate_response(prompt)
-#     return {**state, "answer": answer}
-
 def generate_answer(state: AgentState) -> AgentState:
-    model, tokenizer = get_model()
+    prompt = f"""Use this context to answer the question accurately.
 
-    prompt = f"""<|system|>
-You are an expert ML systems assistant specializing in GPU computing,
-CUDA kernels, and transformer architectures.
-Use the provided context to answer accurately.
+    Context:
+    {state['context']}
 
-Context:
-{state['context']}
-<|user|>
-{state['question']}
-<|assistant|>
-"""
-    inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=1024,
-    ).to(model.device)
+    Question:
+    {state['question']}
 
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=300,
-            temperature=0.7,
-            top_p=0.9,
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id,
-        )
+    Answer:"""
 
-    new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
-    answer     = tokenizer.decode(new_tokens, skip_special_tokens=True)
+    answer = generate_response(prompt)
     return {**state, "answer": answer}
+
+# def generate_answer(state: AgentState) -> AgentState:
+#     model, tokenizer = get_model()
+
+#     prompt = f"""<|system|>
+# You are an expert ML systems assistant specializing in GPU computing,
+# CUDA kernels, and transformer architectures.
+# Use the provided context to answer accurately.
+
+# Context:
+# {state['context']}
+# <|user|>
+# {state['question']}
+# <|assistant|>
+# """
+#     inputs = tokenizer(
+#         prompt,
+#         return_tensors="pt",
+#         truncation=True,
+#         max_length=1024,
+#     ).to(model.device)
+
+#     with torch.no_grad():
+#         outputs = model.generate(
+#             **inputs,
+#             max_new_tokens=300,
+#             temperature=0.7,
+#             top_p=0.9,
+#             do_sample=True,
+#             pad_token_id=tokenizer.eos_token_id,
+#         )
+
+#     new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+#     answer     = tokenizer.decode(new_tokens, skip_special_tokens=True)
+#     return {**state, "answer": answer}
 
 
 def evaluate_answer(state: AgentState) -> AgentState:

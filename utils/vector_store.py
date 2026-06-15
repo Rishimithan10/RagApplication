@@ -82,7 +82,7 @@ today = date.today()
 
 pc = Pinecone(api_key=pinecone_key)
 
-index_name = "doc-index"
+index_name = "rag-index"
 if index_name not in pc.list_indexes().names():
     pc.create_index(
         name=index_name,
@@ -183,7 +183,7 @@ def retrieve_similar_chunks(question, user_id, doc_name, top_k=3, alpha=0.5):
 
 
 def get_next_version(user_id, base_doc_name):
-    index = pc.Index("doc-index")
+    index = pc.Index("rag-index")
     prefix = f"{user_id}_{base_doc_name}_v"
     existing = index.describe_index_stats()["namespaces"].get(user_id, {}).get("vectors", [])
 
